@@ -258,8 +258,8 @@ public struct AppSettings: Codable {
         playbackSpeed = 1.0
         autoplayEnabled = true
         subtitlesLanguage = nil
-        backgroundPlaybackEnabled = false
-        iosPlayerMode = .youtube
+        backgroundPlaybackEnabled = true
+        iosPlayerMode = .native
         landscapeAlwaysPlay = false
         pipEnabled = true
         miniPlayerEnabled = true
@@ -276,7 +276,7 @@ public struct AppSettings: Codable {
         hideWatchedVideos = false
         hideWatchedThreshold = 0.9
         disableLiquidGlass = false
-        disableAnalytics = false
+        disableAnalytics = true
         settingsPINHash = nil
         hideShorts = false
         hideLiveShorts = false

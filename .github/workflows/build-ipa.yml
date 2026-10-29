@@ -1,0 +1,106 @@
+name: Build Native Player IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [native-build]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          ls /Applications | grep -i Xcode || true
+          if [ -d /Applications/Xcode_26.6.app ]; then
+            sudo xcode-select -s /Applications/Xcode_26.6.app
+          else
+            sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          fi
+          xcodebuild -version
+
+      - name: Placeholder config (no real secrets)
+        run: |
+          cp SmartTubeApp/Config/Secrets.xcconfig.example SmartTubeApp/Config/Secrets.xcconfig
+          cat > SmartTubeApp/SmartTubeApp/GoogleService-Info.plist <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>API_KEY</key>
+            <string>AIzaSyDummyKeyForLocalSideloadBuild00</string>
+            <key>GCM_SENDER_ID</key>
+            <string>123456789000</string>
+            <key>PLIST_VERSION</key>
+            <string>1</string>
+            <key>BUNDLE_ID</key>
+            <string>com.void.smarttube.app</string>
+            <key>PROJECT_ID</key>
+            <string>smarttube-sideload-dummy</string>
+            <key>STORAGE_BUCKET</key>
+            <string>smarttube-sideload-dummy.appspot.com</string>
+            <key>IS_ADS_ENABLED</key>
+            <false/>
+            <key>IS_ANALYTICS_ENABLED</key>
+            <false/>
+            <key>IS_APPINVITE_ENABLED</key>
+            <false/>
+            <key>IS_GCM_ENABLED</key>
+            <true/>
+            <key>IS_SIGNIN_ENABLED</key>
+            <true/>
+            <key>GOOGLE_APP_ID</key>
+            <string>1:123456789000:ios:0123456789abcdef01234567</string>
+            <key>DATABASE_URL</key>
+            <string>https://smarttube-sideload-dummy.firebaseio.com</string>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Build iOS app (unsigned, device)
+        run: |
+          xcodebuild build \
+            -workspace SmartTube.xcworkspace \
+            -scheme SmartTube \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            2>&1 | tee build/xcodebuild.log | grep -E "error:|warning: .*GoogleService|BUILD" || true
+          test -d build/DerivedData/Build/Products/Release-iphoneos
+
+      - name: Show build log tail on failure
+        if: failure()
+        run: tail -100 build/xcodebuild.log || true
+
+      - name: Package IPA
+        run: |
+          APP="$(find build/DerivedData/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)"
+          echo "Packaging: $APP"
+          test -n "$APP"
+          rm -rf Payload && mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry SmartTube-Native.ipa Payload
+          ls -lh SmartTube-Native.ipa
+          unzip -l SmartTube-Native.ipa | head -20
+
+      - name: Publish IPA as release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: native-build-${{ github.run_number }}
+          name: SmartTube Native Player — test build ${{ github.run_number }}
+          body: |
+            Unsigned IPA built from PR #180 (native AVPlayer opt-in) with these test defaults:
+            - Video Player defaults to Native Player
+            - Background Playback defaults to ON
+            - Analytics defaults to OFF (dummy Firebase config, no real project)
+
+            Install with SideStore or AltStore (they re-sign with your Apple ID).
+            In the app: Settings > Video Player = Native Player, Background Playback = ON.
+          files: SmartTube-Native.ipa
