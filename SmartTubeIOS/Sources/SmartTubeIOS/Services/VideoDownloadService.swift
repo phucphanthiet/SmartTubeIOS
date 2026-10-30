@@ -1038,7 +1038,7 @@ public final class VideoDownloadService {
                     #if os(iOS)
                     if #available(iOS 16.1, *) {
                         await self.updateLiveActivity(
-                            phase: .downloading, progress: Float(progress))
+                            phase: .downloading, progress: progress)
                     }
                     #endif
                 }
