@@ -65,6 +65,7 @@ jobs:
 
       - name: Build iOS app (unsigned, device)
         run: |
+          set -o pipefail
           xcodebuild build \
             -workspace SmartTube.xcworkspace \
             -scheme SmartTube \
@@ -73,12 +74,19 @@ jobs:
             -derivedDataPath build/DerivedData \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             SWIFT_ACTIVE_COMPILATION_CONDITIONS="ENABLE_DOWNLOADS" \
-            2>&1 | tee build/xcodebuild.log | grep -E "error:|warning: .*GoogleService|BUILD" || true
-          test -d build/DerivedData/Build/Products/Release-iphoneos
+            2>&1 | tee build/xcodebuild.log
+          APP="build/DerivedData/Build/Products/Release-iphoneos/SmartTube.app"
+          test -x "$APP/SmartTube"
 
-      - name: Show build log tail on failure
+      - name: Upload build log on failure
         if: failure()
-        run: tail -100 build/xcodebuild.log || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tail -400 build/xcodebuild.log > "build-log-run${{ github.run_number }}.txt" || true
+          gh release create build-logs --title "Build logs" --notes "xcodebuild logs from failed runs" 2>/dev/null || true
+          gh release upload build-logs "build-log-run${{ github.run_number }}.txt" --clobber || true
+          tail -100 build/xcodebuild.log || true
 
       - name: Package IPA
         run: |
