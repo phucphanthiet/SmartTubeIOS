@@ -66,6 +66,7 @@ jobs:
       - name: Build iOS app (unsigned, device)
         run: |
           set -o pipefail
+          mkdir -p build
           xcodebuild build \
             -workspace SmartTube.xcworkspace \
             -scheme SmartTube \
@@ -83,7 +84,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          { echo '### errors'; grep -n -E "error:" build/xcodebuild.log | head -80; echo; echo '### tail'; tail -200 build/xcodebuild.log; } > notes.md || true
+          { echo '### errors'; grep -n -E "error:" build/xcodebuild.log | head -80; echo; echo '### products'; ls -R build/DerivedData/Build/Products 2>/dev/null | head -40; echo; echo '### tail'; tail -200 build/xcodebuild.log; } > notes.md || true
           gh release create "build-failed-run${{ github.run_number }}" --title "Failed build ${{ github.run_number }}" --notes-file notes.md || true
 
       - name: Package IPA
