@@ -45,6 +45,16 @@ public final class VideoDownloadService {
 
     public private(set) var state: DownloadState = .idle
 
+    /// What the most recent download was, so callers can phrase their
+    /// completion alert correctly (video → Photos library, audio → in-app
+    /// Downloads list).
+    public enum CompletedDownloadKind {
+        case video
+        case audio
+    }
+
+    public private(set) var lastCompletedKind: CompletedDownloadKind = .video
+
     // MARK: - Private
 
     private let api: InnerTubeAPI
@@ -90,6 +100,7 @@ public final class VideoDownloadService {
 
     public func download(video: Video) {
         guard !state.isActive else { return }
+        lastCompletedKind = .video
         state = .fetching
         #if os(iOS)
         if #available(iOS 16.1, *) {
@@ -493,6 +504,86 @@ public final class VideoDownloadService {
 
     /// Copies `mergedFileURL` to the DownloadStore destination and registers the download.
     /// If the copy fails (e.g. disk full) the Photos save is unaffected — this is best-effort.
+    // MARK: - Audio-only download
+
+    /// Downloads only the audio track (best adaptive AAC stream) and stores
+    /// it in the in-app Downloads list for offline listening. Unlike video
+    /// downloads it is not saved to Photos (Photos cannot hold audio files).
+    public func downloadAudio(video: Video) {
+        guard !state.isActive else { return }
+        lastCompletedKind = .audio
+        state = .fetching
+        downloadTask = Task { await performAudioDownload(video: video) }
+    }
+
+    private func performAudioDownload(video: Video) async {
+        let candidates: [(String, String, () async throws -> PlayerInfo)] = [
+            (
+                "Android", InnerTubeClients.Android.userAgent,
+                { [self] in try await api.fetchPlayerInfoAndroid(videoId: video.id) }
+            ),
+            (
+                "Web", InnerTubeClients.Web.userAgent,
+                { [self] in try await api.fetchPlayerInfoForDownload(videoId: video.id) }
+            ),
+        ]
+        for (label, clientUA, fetch) in candidates {
+            guard let info = try? await fetch(),
+                let audioURL = info.bestAdaptiveAudioURL
+            else {
+                downloadLog.notice("[download-audio] \(label) client — no audio stream, trying next")
+                continue
+            }
+            state = .downloading(progress: 0)
+            guard
+                let tempURL = try? await downloadToTemp(
+                    url: audioURL, videoId: video.id + "-aud", userAgent: clientUA)
+            else { continue }
+            let size =
+                (try? FileManager.default.attributesOfItem(atPath: tempURL.path)[.size] as? Int) ?? 0
+            guard size > 0 else {
+                try? FileManager.default.removeItem(at: tempURL)
+                continue
+            }
+            state = .saving
+            storeAudioInDownloadStore(video: video, audioFileURL: tempURL)
+            try? FileManager.default.removeItem(at: tempURL)
+            downloadLog.notice("[download-audio] ✅ saved audio \(video.id) bytes=\(size)")
+            state = .done
+            return
+        }
+        state = .failed("No downloadable audio stream found for this video")
+    }
+
+    private func storeAudioInDownloadStore(video: Video, audioFileURL: URL) {
+        // Distinct id so an audio download never clashes with the video
+        // download of the same video in the Downloads list.
+        let audioId = video.id + "__audio"
+        let destURL = DownloadStore.shared.destinationURL(for: audioId)
+        let fm = FileManager.default
+        try? fm.createDirectory(
+            at: destURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        do {
+            try? fm.removeItem(at: destURL)
+            try fm.copyItem(at: audioFileURL, to: destURL)
+        } catch {
+            downloadLog.notice(
+                "[download-audio] DownloadStore copy failed for \(audioId): \(error.localizedDescription)"
+            )
+            return
+        }
+        DownloadStore.shared.add(
+            DownloadedVideo(
+                videoId: audioId,
+                title: video.title + " (Audio)",
+                channelTitle: video.channelTitle,
+                thumbnailURL: video.thumbnailURL,
+                duration: video.duration ?? 0,
+                fileURL: destURL,
+                downloadedAt: Date()
+            ))
+    }
+
     private func storeInDownloadStore(video: Video, mergedFileURL: URL) {
         let destURL = DownloadStore.shared.destinationURL(for: video.id)
         let fm = FileManager.default

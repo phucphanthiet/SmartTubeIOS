@@ -316,6 +316,16 @@ public struct VideoCardView: View {
                 }
             }
             .disabled(downloadService.state.isActive)
+            Button {
+                downloadService.downloadAudio(video: video)
+            } label: {
+                if downloadService.state.isActive {
+                    Label("Downloading…", systemImage: AppSymbol.download)
+                } else {
+                    Label("Download Audio", systemImage: AppSymbol.audioOnly)
+                }
+            }
+            .disabled(downloadService.state.isActive)
             #endif
         } preview: {
             Group {

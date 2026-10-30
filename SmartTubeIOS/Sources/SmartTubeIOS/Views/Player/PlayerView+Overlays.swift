@@ -609,6 +609,25 @@ extension PlayerView {
         .foregroundStyle(.primary)
         .disabled(downloadService.state.isActive)
         .accessibilityIdentifier("player.moreMenu.downloadButton")
+        Button {
+            showMoreMenu = false
+            downloadService.downloadAudio(video: vm.playerInfo?.video ?? video)
+        } label: {
+            Group {
+                if downloadService.state.isActive {
+                    Label("Downloading…", systemImage: AppSymbol.download)
+                } else {
+                    Label("Download Audio", systemImage: AppSymbol.audioOnly)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.primary)
+        .disabled(downloadService.state.isActive)
+        .accessibilityIdentifier("player.moreMenu.downloadAudioButton")
         Divider()
         #endif
     }

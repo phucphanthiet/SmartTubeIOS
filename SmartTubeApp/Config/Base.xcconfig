@@ -1,6 +1,7 @@
 // Shared settings for all targets. Secrets are optional so forks/CI build without them.
 #include? "Secrets.xcconfig"
 SWIFT_VERSION = 6.0
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) ENABLE_DOWNLOADS
 SWIFT_STRICT_CONCURRENCY = complete
 IPHONEOS_DEPLOYMENT_TARGET = 17.0
 MACOSX_DEPLOYMENT_TARGET = 14.0

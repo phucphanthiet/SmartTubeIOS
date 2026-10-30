@@ -861,10 +861,19 @@ extension PlayerView {
             switch newState {
             case .done:
                 let title = vm.playerInfo?.video.title ?? video.title
-                downloadAlertItem = DownloadAlertItem(
-                    title: String(localized: "Saved to Gallery", bundle: .module),
-                    message: String(localized: "\"\(title)\" has been saved to your Photos library.", bundle: .module)
-                )
+                if downloadService.lastCompletedKind == .audio {
+                    downloadAlertItem = DownloadAlertItem(
+                        title: String(localized: "Audio Saved", bundle: .module),
+                        message: String(
+                            localized: "\"\(title)\" audio has been saved to Library → Downloads.",
+                            bundle: .module)
+                    )
+                } else {
+                    downloadAlertItem = DownloadAlertItem(
+                        title: String(localized: "Saved to Gallery", bundle: .module),
+                        message: String(localized: "\"\(title)\" has been saved to your Photos library.", bundle: .module)
+                    )
+                }
                 downloadService.reset()
             case .failed(let reason):
                 downloadAlertItem = DownloadAlertItem(

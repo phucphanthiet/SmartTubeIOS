@@ -50,10 +50,19 @@ public struct RootView: View {
         .onChange(of: cardDownloadService.state) { _, newState in
             switch newState {
             case .done:
-                cardDownloadAlertItem = DownloadAlertItem(
-                    title: String(localized: "Saved to Gallery", bundle: .module),
-                    message: String(localized: "Video has been saved to your Photos library.", bundle: .module)
-                )
+                if cardDownloadService.lastCompletedKind == .audio {
+                    cardDownloadAlertItem = DownloadAlertItem(
+                        title: String(localized: "Audio Saved", bundle: .module),
+                        message: String(
+                            localized: "Audio has been saved to Library → Downloads for offline listening.",
+                            bundle: .module)
+                    )
+                } else {
+                    cardDownloadAlertItem = DownloadAlertItem(
+                        title: String(localized: "Saved to Gallery", bundle: .module),
+                        message: String(localized: "Video has been saved to your Photos library.", bundle: .module)
+                    )
+                }
                 cardDownloadService.reset()
             case .failed(let reason):
                 cardDownloadAlertItem = DownloadAlertItem(

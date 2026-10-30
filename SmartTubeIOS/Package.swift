@@ -31,7 +31,7 @@ let package = Package(
             name: "SmartTubeIOSCore",
             dependencies: [],
             path: "Sources/SmartTubeIOSCore",
-            swiftSettings: [.swiftLanguageMode(.v6)]
+            swiftSettings: [.swiftLanguageMode(.v6), .define("ENABLE_DOWNLOADS")]
         ),
         // MARK: UI – iOS/iPadOS/macOS (SwiftUI)
         .target(
@@ -46,7 +46,7 @@ let package = Package(
                 .copy("Resources/yt.solver.lib.min.js"),
                 .copy("Resources/yt.solver.core.min.js"),
             ],
-            swiftSettings: [.swiftLanguageMode(.v6)]
+            swiftSettings: [.swiftLanguageMode(.v6), .define("ENABLE_DOWNLOADS")]
         ),
         // MARK: Tests
         .testTarget(
