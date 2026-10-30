@@ -1,0 +1,8 @@
+// Sideload-only build settings, applied via `xcodebuild -xcconfig` in the
+// fork's CI workflow. Enables the downloads code in the app-project targets
+// (AppEntry's VideoDownloadService injection, the download widget) to match
+// the ENABLE_DOWNLOADS define the SwiftPM package gets from Package.swift.
+// Project-level only: SwiftPM dependency targets (Firebase, …) do not
+// inherit this, unlike a command-line SWIFT_ACTIVE_COMPILATION_CONDITIONS
+// override, which broke Firebase's GoogleUtilities module resolution.
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) ENABLE_DOWNLOADS

@@ -73,8 +73,8 @@ jobs:
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build/DerivedData \
+            -xcconfig SmartTubeApp/Config/Sideload.xcconfig \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            SWIFT_ACTIVE_COMPILATION_CONDITIONS="ENABLE_DOWNLOADS" \
             2>&1 | tee build/xcodebuild.log
           APP="build/DerivedData/Build/Products/Release-iphoneos/SmartTube.app"
           test -x "$APP/SmartTube"
