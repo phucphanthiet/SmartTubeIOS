@@ -78,15 +78,13 @@ jobs:
           APP="build/DerivedData/Build/Products/Release-iphoneos/SmartTube.app"
           test -x "$APP/SmartTube"
 
-      - name: Upload build log on failure
+      - name: Publish build log on failure
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tail -400 build/xcodebuild.log > "build-log-run${{ github.run_number }}.txt" || true
-          gh release create build-logs --title "Build logs" --notes "xcodebuild logs from failed runs" 2>/dev/null || true
-          gh release upload build-logs "build-log-run${{ github.run_number }}.txt" --clobber || true
-          tail -100 build/xcodebuild.log || true
+          { echo '### errors'; grep -n -E "error:" build/xcodebuild.log | head -80; echo; echo '### tail'; tail -200 build/xcodebuild.log; } > notes.md || true
+          gh release create "build-failed-run${{ github.run_number }}" --title "Failed build ${{ github.run_number }}" --notes-file notes.md || true
 
       - name: Package IPA
         run: |
