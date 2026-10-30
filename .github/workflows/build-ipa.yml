@@ -84,7 +84,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          { echo '### errors'; grep -n -E "error:" build/xcodebuild.log | head -80; echo; echo '### products'; ls -R build/DerivedData/Build/Products 2>/dev/null | head -40; echo; echo '### tail'; tail -200 build/xcodebuild.log; } > notes.md || true
+          { echo '### errors'; grep -n -E "error:" build/xcodebuild.log | cut -c1-280 | head -60; echo; echo '### products'; ls -R build/DerivedData/Build/Products 2>/dev/null | head -40; echo; echo '### tail'; tail -120 build/xcodebuild.log | cut -c1-280; } > notes.md || true
           gh release create "build-failed-run${{ github.run_number }}" --title "Failed build ${{ github.run_number }}" --notes-file notes.md || true
 
       - name: Package IPA
