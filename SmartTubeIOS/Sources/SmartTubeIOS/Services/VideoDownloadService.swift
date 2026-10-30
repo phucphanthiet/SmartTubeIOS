@@ -511,13 +511,13 @@ public final class VideoDownloadService {
     /// A format paired with the User-Agent of the InnerTube client that
     /// produced its URL. CDN URLs are signed per client (`c=` parameter), so
     /// downloads must present the same UA or the CDN answers 403.
-    public struct ResolvedFormat {
+    public struct ResolvedFormat: Sendable {
         public let format: VideoFormat
         public let userAgent: String
     }
 
     /// One selectable video quality for the download picker.
-    public struct VideoDownloadOption: Identifiable {
+    public struct VideoDownloadOption: Identifiable, Sendable {
         public let id: String
         public let title: String
         public let detail: String
@@ -530,7 +530,7 @@ public final class VideoDownloadService {
 
     /// Audio output formats offered by the picker. MP3 is intentionally not
     /// listed: iOS has no MP3 encoder in AVFoundation.
-    public enum AudioFormatKind: String, CaseIterable {
+    public enum AudioFormatKind: String, CaseIterable, Sendable {
         case original
         case aac256
         case aac128
@@ -558,7 +558,7 @@ public final class VideoDownloadService {
     }
 
     /// One selectable audio output for the download picker.
-    public struct AudioDownloadOption: Identifiable {
+    public struct AudioDownloadOption: Identifiable, Sendable {
         public let kind: AudioFormatKind
         public var id: String { kind.rawValue }
         public let title: String
