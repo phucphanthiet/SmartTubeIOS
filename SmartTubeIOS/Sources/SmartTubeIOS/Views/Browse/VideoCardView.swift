@@ -47,6 +47,7 @@ public struct VideoCardView: View {
     #if !os(tvOS)
     #if ENABLE_DOWNLOADS
     @Environment(VideoDownloadService.self) private var downloadService
+    @State private var downloadPickerKind: DownloadPickerKind?
     #endif
     #endif
     #if os(tvOS)
@@ -307,22 +308,22 @@ public struct VideoCardView: View {
             }
             #if !os(tvOS) && ENABLE_DOWNLOADS
             Button {
-                downloadService.download(video: video)
+                downloadPickerKind = .video
             } label: {
                 if downloadService.state.isActive {
                     Label("Downloading…", systemImage: AppSymbol.download)
                 } else {
-                    Label("Download to Gallery", systemImage: AppSymbol.download)
+                    Label("Download Video…", systemImage: AppSymbol.download)
                 }
             }
             .disabled(downloadService.state.isActive)
             Button {
-                downloadService.downloadAudio(video: video)
+                downloadPickerKind = .audio
             } label: {
                 if downloadService.state.isActive {
                     Label("Downloading…", systemImage: AppSymbol.download)
                 } else {
-                    Label("Download Audio", systemImage: AppSymbol.audioOnly)
+                    Label("Download Audio…", systemImage: AppSymbol.audioOnly)
                 }
             }
             .disabled(downloadService.state.isActive)
@@ -409,6 +410,11 @@ public struct VideoCardView: View {
                     onFinished: handlePlaylistPickerResult
                 )
             }
+            #if ENABLE_DOWNLOADS
+            .sheet(item: $downloadPickerKind) { kind in
+                DownloadOptionsView(video: video, kind: kind, service: downloadService)
+            }
+            #endif
         #endif
     }
 

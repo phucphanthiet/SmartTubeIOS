@@ -44,6 +44,7 @@ public struct PlayerView: View {
     #if !os(tvOS)
     #if ENABLE_DOWNLOADS
     @State var downloadService: VideoDownloadService
+    @State var downloadPickerKind: DownloadPickerKind?
     #endif
     @State var downloadAlertItem: DownloadAlertItem?
     #endif

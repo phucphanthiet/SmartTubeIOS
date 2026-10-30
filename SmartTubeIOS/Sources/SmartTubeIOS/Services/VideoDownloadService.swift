@@ -234,7 +234,8 @@ public final class VideoDownloadService {
             state = .downloading(progress: 0)
             let mergedURL = try await mergeAdaptiveStreams(
                 videoURL: videoURL, audioURL: audioURL, videoId: video.id,
-                userAgent: InnerTubeClients.Android.userAgent)
+                videoUserAgent: InnerTubeClients.Android.userAgent,
+                audioUserAgent: InnerTubeClients.Android.userAgent)
             state = .saving
             #if os(iOS)
             if #available(iOS 16.1, *) { await updateLiveActivity(phase: .saving, progress: 1) }
@@ -348,11 +349,12 @@ public final class VideoDownloadService {
     /// (sample-level copy, no re-encode of codec data).
     private nonisolated func mergeAdaptiveStreams(
         videoURL: URL, audioURL: URL, videoId: String,
-        userAgent: String = InnerTubeClients.iOS.userAgent
+        videoUserAgent: String = InnerTubeClients.iOS.userAgent,
+        audioUserAgent: String = InnerTubeClients.iOS.userAgent
     ) async throws -> URL {
         // Download both streams concurrently with explicit UA per-request
-        let videoReq = VideoDownloadService.cdnRequest(for: videoURL, userAgent: userAgent)
-        let audioReq = VideoDownloadService.cdnRequest(for: audioURL, userAgent: userAgent)
+        let videoReq = VideoDownloadService.cdnRequest(for: videoURL, userAgent: videoUserAgent)
+        let audioReq = VideoDownloadService.cdnRequest(for: audioURL, userAgent: audioUserAgent)
         async let videoTemp = VideoDownloadService.cdnSession.download(for: videoReq)
         async let audioTemp = VideoDownloadService.cdnSession.download(for: audioReq)
         let (videoResult, audioResult) = try await (videoTemp, audioTemp)
@@ -504,84 +506,484 @@ public final class VideoDownloadService {
 
     /// Copies `mergedFileURL` to the DownloadStore destination and registers the download.
     /// If the copy fails (e.g. disk full) the Photos save is unaffected — this is best-effort.
-    // MARK: - Audio-only download
+    // MARK: - Download options (quality / format picker)
 
-    /// Downloads only the audio track (best adaptive AAC stream) and stores
-    /// it in the in-app Downloads list for offline listening. Unlike video
-    /// downloads it is not saved to Photos (Photos cannot hold audio files).
-    public func downloadAudio(video: Video) {
+    /// A format paired with the User-Agent of the InnerTube client that
+    /// produced its URL. CDN URLs are signed per client (`c=` parameter), so
+    /// downloads must present the same UA or the CDN answers 403.
+    public struct ResolvedFormat {
+        public let format: VideoFormat
+        public let userAgent: String
+    }
+
+    /// One selectable video quality for the download picker.
+    public struct VideoDownloadOption: Identifiable {
+        public let id: String
+        public let title: String
+        public let detail: String
+        /// Adaptive H.264 video + separate audio, merged locally. Nil for muxed.
+        public let video: ResolvedFormat?
+        public let audio: ResolvedFormat?
+        /// Pre-muxed MP4 (itag 18/22 style). Nil for adaptive options.
+        public let muxed: ResolvedFormat?
+    }
+
+    /// Audio output formats offered by the picker. MP3 is intentionally not
+    /// listed: iOS has no MP3 encoder in AVFoundation.
+    public enum AudioFormatKind: String, CaseIterable {
+        case original
+        case aac256
+        case aac128
+        case aac64
+        case wav
+        case m4r
+
+        public var fileExtension: String {
+            switch self {
+            case .original, .aac256, .aac128, .aac64: return "m4a"
+            case .wav: return "wav"
+            case .m4r: return "m4r"
+            }
+        }
+
+        /// Target bitrate for transcoded AAC outputs; nil = keep source / PCM.
+        public var aacBitrate: Int? {
+            switch self {
+            case .aac256: return 256_000
+            case .aac128, .m4r: return 128_000
+            case .aac64: return 64_000
+            case .original, .wav: return nil
+            }
+        }
+    }
+
+    /// One selectable audio output for the download picker.
+    public struct AudioDownloadOption: Identifiable {
+        public let kind: AudioFormatKind
+        public var id: String { kind.rawValue }
+        public let title: String
+        public let detail: String
+        /// Best available audio stream, downloaded first, then converted.
+        public let source: ResolvedFormat
+    }
+
+    private struct ClientSource {
+        let label: String
+        let userAgent: String
+        let fetch: () async throws -> PlayerInfo
+    }
+
+    /// Clients tried when resolving downloadable streams, in order. The iOS
+    /// client comes first: it is the only one guaranteed to return adaptive
+    /// formats with plain URLs for most videos (Web returns cipher-protected
+    /// adaptive URLs; Android has started doing the same on many videos,
+    /// which is why v1 audio downloads found no stream at all).
+    private func clientSources(videoId: String) -> [ClientSource] {
+        [
+            ClientSource(
+                label: "iOS", userAgent: InnerTubeClients.iOS.userAgent,
+                fetch: { [self] in try await api.fetchPlayerInfo(videoId: videoId) }),
+            ClientSource(
+                label: "Android", userAgent: InnerTubeClients.Android.userAgent,
+                fetch: { [self] in try await api.fetchPlayerInfoAndroid(videoId: videoId) }),
+            ClientSource(
+                label: "AndroidVR", userAgent: InnerTubeClients.AndroidVR.userAgent,
+                fetch: { [self] in try await api.fetchPlayerInfoAndroidVR(videoId: videoId) }),
+            ClientSource(
+                label: "Web", userAgent: InnerTubeClients.Web.userAgent,
+                fetch: { [self] in try await api.fetchPlayerInfoForDownload(videoId: videoId) }),
+        ]
+    }
+
+    /// Fetches player info from every client that answers and pairs each
+    /// format with its client's UA. TV-authenticated (SABR) fetches are
+    /// deliberately not used — their URLs are not directly downloadable.
+    private func resolveAllFormats(videoId: String) async -> [ResolvedFormat] {
+        var resolved: [ResolvedFormat] = []
+        for source in clientSources(videoId: videoId) {
+            guard let info = try? await source.fetch() else {
+                downloadLog.notice("[download] resolve: \(source.label) client failed, skipping")
+                continue
+            }
+            let withURL = info.formats.filter { $0.url != nil }
+            downloadLog.notice(
+                "[download] resolve: \(source.label) formats=\(info.formats.count) withURL=\(withURL.count)"
+            )
+            resolved += withURL.map { ResolvedFormat(format: $0, userAgent: source.userAgent) }
+        }
+        return resolved
+    }
+
+    private static func formatSize(_ bytes: Double) -> String {
+        if bytes >= 1_000_000 {
+            return String(format: "~%.0f MB", bytes / 1_000_000)
+        }
+        return String(format: "~%.0f KB", bytes / 1_000)
+    }
+
+    private static func isAdaptiveAVC(_ f: VideoFormat) -> Bool {
+        f.mimeType.hasPrefix("video/mp4") && !f.mimeType.contains(", ")
+            && f.mimeType.contains("avc1")
+    }
+
+    private static func isMuxed(_ f: VideoFormat) -> Bool {
+        f.mimeType.hasPrefix("video/mp4") && f.mimeType.contains(", ")
+    }
+
+    private static func isAudioMP4(_ f: VideoFormat) -> Bool {
+        f.mimeType.hasPrefix("audio/mp4")
+    }
+
+    /// Builds the quality list for the video download picker: every adaptive
+    /// H.264 MP4 height (merged with the best audio), plus the pre-muxed
+    /// option when one exists. VP9/WebM streams are excluded — AVFoundation
+    /// cannot merge them into an MP4 that Photos accepts.
+    public func fetchVideoOptions(video: Video) async -> [VideoDownloadOption] {
+        let all = await resolveAllFormats(videoId: video.id)
+        let duration = video.duration ?? 0
+        let bestAudio = all.filter { Self.isAudioMP4($0.format) }
+            .max { ($0.format.bitrate ?? 0) < ($1.format.bitrate ?? 0) }
+
+        var options: [VideoDownloadOption] = []
+        var seenHeights = Set<Int>()
+        let avc = all.filter { Self.isAdaptiveAVC($0.format) }
+            .sorted { ($0.format.bitrate ?? 0) > ($1.format.bitrate ?? 0) }
+        for candidate in avc {
+            let h = candidate.format.height
+            guard h > 0, !seenHeights.contains(h) else { continue }
+            seenHeights.insert(h)
+            let vBitrate = Double(candidate.format.bitrate ?? 0)
+            let aBitrate = Double(bestAudio?.format.bitrate ?? 0)
+            let est = duration > 0 ? (vBitrate + aBitrate) * duration / 8 : 0
+            options.append(
+                VideoDownloadOption(
+                    id: "avc\(h)",
+                    title: "\(h)p",
+                    detail: est > 0
+                        ? "\(Self.formatSize(est)) • MP4 H.264 + AAC"
+                        : "MP4 H.264 + AAC",
+                    video: candidate,
+                    audio: bestAudio,
+                    muxed: nil))
+        }
+        options.sort { lhs, rhs in
+            (Int(lhs.id.dropFirst(3)) ?? 0) > (Int(rhs.id.dropFirst(3)) ?? 0)
+        }
+
+        if let muxed = all.filter({ Self.isMuxed($0.format) })
+            .max(by: { ($0.format.bitrate ?? 0) < ($1.format.bitrate ?? 0) })
+        {
+            let h = muxed.format.height
+            let est = duration > 0 ? Double(muxed.format.bitrate ?? 0) * duration / 8 : 0
+            options.append(
+                VideoDownloadOption(
+                    id: "muxed",
+                    title: h > 0 ? "\(h)p (pre-muxed)" : "Pre-muxed MP4",
+                    detail: est > 0
+                        ? "\(Self.formatSize(est)) • single file, fastest"
+                        : "Single file, fastest",
+                    video: nil,
+                    audio: nil,
+                    muxed: muxed))
+        }
+        return options
+    }
+
+    /// Builds the format list for the audio download picker, from the best
+    /// audio stream any client offers.
+    public func fetchAudioOptions(video: Video) async -> [AudioDownloadOption] {
+        let all = await resolveAllFormats(videoId: video.id)
+        guard
+            let source = all.filter({ Self.isAudioMP4($0.format) })
+                .max(by: { ($0.format.bitrate ?? 0) < ($1.format.bitrate ?? 0) })
+        else { return [] }
+        let duration = video.duration ?? 0
+        let srcBitrate = Double(source.format.bitrate ?? 128_000)
+        func est(_ bitrate: Double) -> String {
+            duration > 0 ? Self.formatSize(bitrate * duration / 8) : ""
+        }
+        var options: [AudioDownloadOption] = [
+            AudioDownloadOption(
+                kind: .original,
+                title: "Original (AAC, no conversion)",
+                detail: "\(est(srcBitrate)) • \(Int(srcBitrate / 1000)) kbps • .m4a",
+                source: source)
+        ]
+        if srcBitrate > 200_000 {
+            options.append(
+                AudioDownloadOption(
+                    kind: .aac256, title: "AAC 256 kbps",
+                    detail: "\(est(256_000)) • .m4a", source: source))
+        }
+        options.append(
+            AudioDownloadOption(
+                kind: .aac128, title: "AAC 128 kbps",
+                detail: "\(est(128_000)) • .m4a", source: source))
+        options.append(
+            AudioDownloadOption(
+                kind: .aac64, title: "AAC 64 kbps (smallest)",
+                detail: "\(est(64_000)) • .m4a", source: source))
+        options.append(
+            AudioDownloadOption(
+                kind: .m4r, title: "M4R ringtone (AAC 128 kbps)",
+                detail: "\(est(128_000)) • .m4r", source: source))
+        // WAV = 16-bit stereo PCM at 48 kHz ≈ 192 KB/s.
+        options.append(
+            AudioDownloadOption(
+                kind: .wav, title: "WAV (lossless, large)",
+                detail: "\(est(1_536_000)) • .wav", source: source))
+        return options
+    }
+
+    /// Downloads a video at the quality chosen in the picker.
+    public func download(video: Video, option: VideoDownloadOption) {
+        guard !state.isActive else { return }
+        lastCompletedKind = .video
+        state = .fetching
+        #if os(iOS)
+        if #available(iOS 16.1, *) {
+            startLiveActivity(video: video)
+        }
+        #endif
+        downloadTask = Task { await performDownload(video: video, option: option) }
+    }
+
+    private func performDownload(video: Video, option: VideoDownloadOption) async {
+        do {
+            guard await requestPhotoAddAccess() else {
+                state = .failed("Photo library access is required to save the video")
+                #if os(iOS)
+                if #available(iOS 16.1, *) { await endLiveActivity(phase: .failed) }
+                #endif
+                return
+            }
+            state = .downloading(progress: 0)
+            let finalURL: URL
+            if let muxed = option.muxed, let muxedURL = muxed.format.url {
+                let tempURL = try await downloadToTempChecked(
+                    url: muxedURL, videoId: video.id + "-dl", userAgent: muxed.userAgent)
+                state = .saving
+                #if os(iOS)
+                if #available(iOS 16.1, *) { await updateLiveActivity(phase: .saving, progress: 1) }
+                #endif
+                finalURL = try await passthroughRemux(
+                    inputURL: tempURL, videoId: video.id, suffix: "muxed")
+                try? FileManager.default.removeItem(at: tempURL)
+            } else if let videoStream = option.video, let audioStream = option.audio,
+                let videoURL = videoStream.format.url, let audioURL = audioStream.format.url
+            {
+                finalURL = try await mergeAdaptiveStreams(
+                    videoURL: videoURL, audioURL: audioURL, videoId: video.id,
+                    videoUserAgent: videoStream.userAgent,
+                    audioUserAgent: audioStream.userAgent)
+            } else {
+                state = .failed("No downloadable stream found for this video")
+                #if os(iOS)
+                if #available(iOS 16.1, *) { await endLiveActivity(phase: .failed) }
+                #endif
+                return
+            }
+            state = .saving
+            try await saveToPhotoLibrary(fileURL: finalURL)
+            storeInDownloadStore(video: video, mergedFileURL: finalURL)
+            try? FileManager.default.removeItem(at: finalURL)
+            downloadLog.notice("[download] ✅ saved chosen-quality video \(video.id) option=\(option.id)")
+            state = .done
+            #if os(iOS)
+            if #available(iOS 16.1, *) { await endLiveActivity(phase: .done) }
+            #endif
+        } catch is CancellationError {
+            state = .idle
+            #if os(iOS)
+            if #available(iOS 16.1, *) { await endLiveActivity(phase: .failed) }
+            #endif
+        } catch {
+            state = .failed(error.localizedDescription)
+            #if os(iOS)
+            if #available(iOS 16.1, *) { await endLiveActivity(phase: .failed) }
+            #endif
+        }
+    }
+
+    /// Downloads the audio track in the format chosen in the picker.
+    public func downloadAudio(video: Video, option: AudioDownloadOption) {
         guard !state.isActive else { return }
         lastCompletedKind = .audio
         state = .fetching
-        downloadTask = Task { await performAudioDownload(video: video) }
+        downloadTask = Task { await performAudioDownload(video: video, option: option) }
     }
 
-    private func performAudioDownload(video: Video) async {
-        let candidates: [(String, String, () async throws -> PlayerInfo)] = [
-            (
-                "Android", InnerTubeClients.Android.userAgent,
-                { [self] in try await api.fetchPlayerInfoAndroid(videoId: video.id) }
-            ),
-            (
-                "Web", InnerTubeClients.Web.userAgent,
-                { [self] in try await api.fetchPlayerInfoForDownload(videoId: video.id) }
-            ),
-        ]
-        for (label, clientUA, fetch) in candidates {
-            guard let info = try? await fetch(),
-                let audioURL = info.bestAdaptiveAudioURL
-            else {
-                downloadLog.notice("[download-audio] \(label) client — no audio stream, trying next")
-                continue
+    private func performAudioDownload(video: Video, option: AudioDownloadOption) async {
+        do {
+            guard let sourceURL = option.source.format.url else {
+                state = .failed("No downloadable audio stream found for this video")
+                return
             }
             state = .downloading(progress: 0)
-            guard
-                let tempURL = try? await downloadToTemp(
-                    url: audioURL, videoId: video.id + "-aud", userAgent: clientUA)
-            else { continue }
-            let size =
-                (try? FileManager.default.attributesOfItem(atPath: tempURL.path)[.size] as? Int) ?? 0
-            guard size > 0 else {
-                try? FileManager.default.removeItem(at: tempURL)
-                continue
-            }
+            let tempURL = try await downloadToTempChecked(
+                url: sourceURL, videoId: video.id + "-aud", userAgent: option.source.userAgent)
+            defer { try? FileManager.default.removeItem(at: tempURL) }
             state = .saving
-            storeAudioInDownloadStore(video: video, audioFileURL: tempURL)
-            try? FileManager.default.removeItem(at: tempURL)
-            downloadLog.notice("[download-audio] ✅ saved audio \(video.id) bytes=\(size)")
+            let ext = option.kind.fileExtension
+            let destURL = DownloadStore.shared.destinationURL(
+                for: video.id + "__audio_" + option.kind.rawValue)
+                .deletingPathExtension().appendingPathExtension(ext)
+            try? FileManager.default.createDirectory(
+                at: destURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? FileManager.default.removeItem(at: destURL)
+            if option.kind == .original {
+                try FileManager.default.copyItem(at: tempURL, to: destURL)
+            } else {
+                try await transcodeAudio(inputURL: tempURL, outputURL: destURL, kind: option.kind)
+            }
+            storeAudioInDownloadStore(video: video, audioFileURL: destURL, option: option)
+            downloadLog.notice(
+                "[download-audio] ✅ saved \(video.id) kind=\(option.kind.rawValue) -> \(destURL.lastPathComponent)"
+            )
             state = .done
-            return
+        } catch is CancellationError {
+            state = .idle
+        } catch {
+            downloadLog.error("[download-audio] ❌ failed: \(error.localizedDescription)")
+            state = .failed(error.localizedDescription)
         }
-        state = .failed("No downloadable audio stream found for this video")
     }
 
-    private func storeAudioInDownloadStore(video: Video, audioFileURL: URL) {
-        // Distinct id so an audio download never clashes with the video
-        // download of the same video in the Downloads list.
-        let audioId = video.id + "__audio"
-        let destURL = DownloadStore.shared.destinationURL(for: audioId)
-        let fm = FileManager.default
-        try? fm.createDirectory(
-            at: destURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        do {
-            try? fm.removeItem(at: destURL)
-            try fm.copyItem(at: audioFileURL, to: destURL)
-        } catch {
-            downloadLog.notice(
-                "[download-audio] DownloadStore copy failed for \(audioId): \(error.localizedDescription)"
-            )
-            return
-        }
+    private func storeAudioInDownloadStore(
+        video: Video, audioFileURL: URL, option: AudioDownloadOption
+    ) {
+        let audioId = video.id + "__audio_" + option.kind.rawValue
         DownloadStore.shared.add(
             DownloadedVideo(
                 videoId: audioId,
-                title: video.title + " (Audio)",
+                title: video.title + " (Audio \(option.kind.rawValue.uppercased()))",
                 channelTitle: video.channelTitle,
                 thumbnailURL: video.thumbnailURL,
                 duration: video.duration ?? 0,
-                fileURL: destURL,
+                fileURL: audioFileURL,
                 downloadedAt: Date()
             ))
+    }
+
+    /// Downloads to a temp file, verifying the HTTP status is 200 — plain
+    /// `URLSession.download` happily saves a 403 error page as the "file".
+    private func downloadToTempChecked(
+        url: URL, videoId: String, userAgent: String
+    ) async throws -> URL {
+        let req = VideoDownloadService.cdnRequest(for: url, userAgent: userAgent)
+        let (tempURL, response) = try await VideoDownloadService.cdnSession.download(for: req)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let size =
+            (try? FileManager.default.attributesOfItem(atPath: tempURL.path)[.size] as? Int) ?? 0
+        downloadLog.notice("[download] checked download status=\(status) bytes=\(size)")
+        guard status == 200, size > 0 else {
+            try? FileManager.default.removeItem(at: tempURL)
+            throw URLError(.badServerResponse)
+        }
+        let destURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(videoId).mp4")
+        try? FileManager.default.removeItem(at: destURL)
+        try FileManager.default.moveItem(at: tempURL, to: destURL)
+        return destURL
+    }
+
+    /// Transcodes a downloaded audio file to AAC (.m4a/.m4r at the kind's
+    /// bitrate) or WAV (16-bit LPCM), decoding through AVAssetReader and
+    /// re-encoding with AVAssetWriter.
+    private nonisolated func transcodeAudio(
+        inputURL: URL, outputURL: URL, kind: AudioFormatKind
+    ) async throws {
+        let asset = AVURLAsset(url: inputURL)
+        guard let srcTrack = try await asset.loadTracks(withMediaType: .audio).first else {
+            throw URLError(.cannotDecodeContentData)
+        }
+        // Source sample rate / channel count from the format description so
+        // the writer matches the decoded stream.
+        var sampleRate: Double = 48_000
+        var channels: Int = 2
+        if let formatDesc = try await srcTrack.load(.formatDescriptions).first,
+            let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)
+        {
+            if asbd.pointee.mSampleRate > 0 { sampleRate = asbd.pointee.mSampleRate }
+            if asbd.pointee.mChannelsPerFrame > 0 { channels = Int(asbd.pointee.mChannelsPerFrame) }
+        }
+
+        let reader = try AVAssetReader(asset: asset)
+        let readerOutput = AVAssetReaderTrackOutput(
+            track: srcTrack,
+            outputSettings: [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsNonInterleaved: false,
+            ])
+        readerOutput.alwaysCopiesSampleData = false
+        guard reader.canAdd(readerOutput) else { throw URLError(.cannotDecodeContentData) }
+        reader.add(readerOutput)
+
+        let fileType: AVFileType = kind == .wav ? .wav : .m4a
+        let writer = try AVAssetWriter(outputURL: outputURL, fileType: fileType)
+        let outputSettings: [String: Any]
+        if kind == .wav {
+            outputSettings = [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsNonInterleaved: false,
+                AVSampleRateKey: sampleRate,
+                AVNumberOfChannelsKey: channels,
+            ]
+        } else {
+            outputSettings = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVEncoderBitRateKey: kind.aacBitrate ?? 128_000,
+                AVSampleRateKey: sampleRate,
+                AVNumberOfChannelsKey: channels,
+            ]
+        }
+        let writerInput = AVAssetWriterInput(mediaType: .audio, outputSettings: outputSettings)
+        writerInput.expectsMediaDataInRealTime = false
+        guard writer.canAdd(writerInput) else { throw URLError(.fileDoesNotExist) }
+        writer.add(writerInput)
+
+        guard reader.startReading() else {
+            throw reader.error ?? URLError(.cannotDecodeContentData)
+        }
+        guard writer.startWriting() else {
+            throw writer.error ?? URLError(.cannotCreateFile)
+        }
+        writer.startSession(atSourceTime: .zero)
+
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            let queue = DispatchQueue(label: "com.smarttube.audio-transcode", qos: .userInitiated)
+            nonisolated(unsafe) let writerInput = writerInput
+            nonisolated(unsafe) let readerOutput = readerOutput
+            nonisolated(unsafe) let reader = reader
+            nonisolated(unsafe) let writer = writer
+            writerInput.requestMediaDataWhenReady(on: queue) {
+                while writerInput.isReadyForMoreMediaData {
+                    if let sample = readerOutput.copyNextSampleBuffer() {
+                        writerInput.append(sample)
+                    } else {
+                        writerInput.markAsFinished()
+                        writer.finishWriting {
+                            if writer.status == .completed {
+                                cont.resume()
+                            } else {
+                                cont.resume(
+                                    throwing: writer.error ?? URLError(.fileDoesNotExist))
+                            }
+                        }
+                        return
+                    }
+                }
+            }
+        }
+        if reader.status == .failed {
+            throw reader.error ?? URLError(.cannotDecodeContentData)
+        }
     }
 
     private func storeInDownloadStore(video: Video, mergedFileURL: URL) {

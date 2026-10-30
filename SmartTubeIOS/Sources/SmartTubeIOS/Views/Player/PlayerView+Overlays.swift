@@ -592,13 +592,13 @@ extension PlayerView {
         #if !os(tvOS) && ENABLE_DOWNLOADS
         Button {
             showMoreMenu = false
-            downloadService.download(video: vm.playerInfo?.video ?? video)
+            downloadPickerKind = .video
         } label: {
             Group {
                 if downloadService.state.isActive {
                     Label("Downloading…", systemImage: AppSymbol.download)
                 } else {
-                    Label("Download to Gallery", systemImage: AppSymbol.download)
+                    Label("Download Video…", systemImage: AppSymbol.download)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -611,13 +611,13 @@ extension PlayerView {
         .accessibilityIdentifier("player.moreMenu.downloadButton")
         Button {
             showMoreMenu = false
-            downloadService.downloadAudio(video: vm.playerInfo?.video ?? video)
+            downloadPickerKind = .audio
         } label: {
             Group {
                 if downloadService.state.isActive {
                     Label("Downloading…", systemImage: AppSymbol.download)
                 } else {
-                    Label("Download Audio", systemImage: AppSymbol.audioOnly)
+                    Label("Download Audio…", systemImage: AppSymbol.audioOnly)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
