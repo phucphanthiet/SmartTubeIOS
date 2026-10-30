@@ -98,6 +98,14 @@ jobs:
           ls -lh SmartTube-Native.ipa
           unzip -l SmartTube-Native.ipa | head -20
 
+      - name: Publish failure notes (late steps)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          { echo '### errors'; grep -n -E "error:" build/xcodebuild.log 2>/dev/null | cut -c1-280 | head -60; echo; echo '### workspace'; ls -la; ls -la Payload 2>/dev/null | head; echo; echo '### tail'; tail -120 build/xcodebuild.log 2>/dev/null | cut -c1-280; } > notes.md || true
+          gh release create "build-failed-run${{ github.run_number }}" --title "Failed build ${{ github.run_number }}" --notes-file notes.md || true
+
       - name: Publish IPA as release asset
         uses: softprops/action-gh-release@v2
         with:
