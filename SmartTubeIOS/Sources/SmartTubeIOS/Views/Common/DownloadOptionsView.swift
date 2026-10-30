@@ -1,5 +1,6 @@
 // Downloading is compiled out (App Store guideline 5.2.3). Define ENABLE_DOWNLOADS to build it.
 #if ENABLE_DOWNLOADS
+import SmartTubeIOSCore
 import SwiftUI
 
 /// Which download picker to present: video quality or audio format.

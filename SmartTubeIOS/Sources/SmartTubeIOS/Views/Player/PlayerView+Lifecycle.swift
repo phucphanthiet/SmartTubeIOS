@@ -889,8 +889,7 @@ extension PlayerView {
             Alert(title: Text(item.title), message: Text(item.message), dismissButton: .default(Text("OK")))
         }
         .sheet(item: $downloadPickerKind) { kind in
-            DownloadOptionsView(
-                video: vm.playerInfo?.video ?? video, kind: kind, service: downloadService)
+            downloadOptionsSheet(for: kind)
         }
         #endif
         // Intercept smarttube://seek/<seconds> links emitted by timestamp spans in
@@ -907,6 +906,15 @@ extension PlayerView {
                 return .systemAction
             })
     }
+
+    #if !os(tvOS) && ENABLE_DOWNLOADS
+    /// Builds the download picker sheet content. Extracted into a helper so
+    /// the lifecycle modifier chain stays cheap for the type checker.
+    private func downloadOptionsSheet(for kind: DownloadPickerKind) -> DownloadOptionsView {
+        DownloadOptionsView(
+            video: vm.playerInfo?.video ?? video, kind: kind, service: downloadService)
+    }
+    #endif
 
     // MARK: - Controls overlay
 
