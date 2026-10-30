@@ -59,6 +59,9 @@ public final class VideoDownloadService {
 
     private let api: InnerTubeAPI
     private var downloadTask: Task<Void, Never>?
+    /// Keeps the HLS proxy loader alive for the duration of an HLS export —
+    /// AVURLAsset does not retain its resourceLoader delegate.
+    private var activeHLSLoader: YTHLSProxyLoader?
 
     #if os(iOS)
     @available(iOS 16.1, *)
@@ -725,7 +728,12 @@ public final class VideoDownloadService {
         adaptiveOptions.sort { lhs, rhs in
             (Int(lhs.id.dropFirst(3)) ?? 0) > (Int(rhs.id.dropFirst(3)) ?? 0)
         }
-        options += adaptiveOptions
+        // Direct adaptive downloads failed on device in both v4 and v5 tests
+        // (CDN returns empty files), so they are offered only when neither
+        // the HLS player stream nor a pre-muxed file exists.
+        if options.isEmpty {
+            options += adaptiveOptions
+        }
         return options
     }
 
@@ -969,12 +977,39 @@ public final class VideoDownloadService {
 
     /// Exports the player's HLS stream to a Photos-compatible MP4.
     ///
-    /// This deliberately reuses the playback route rather than downloading a
-    /// raw googlevideo file. AVFoundation follows the signed HLS manifest and
-    /// its segment requests just as it does during playback, then the export
-    /// preset caps the result at 1920×1080 H.264/AAC for Photos.
-    private func exportHLSToMP4(hlsURL: URL, videoId: String) async throws -> URL {
-        let asset = AVURLAsset(url: hlsURL)
+    /// v6: build the asset exactly the way playback does — the same HLS
+    /// manifest from a fresh iOS-client fetch, the same HTTP header fields
+    /// (UA + Origin + Referer), and the same `YTHLSProxyLoader` attached as
+    /// resourceLoader delegate (capped at 1080p / avc1). The v5 attempt used
+    /// a bare `AVURLAsset`, whose segment requests the CDN rejected.
+    /// Export progress is polled into `state` so the UI shows movement
+    /// instead of sitting at 0% looking frozen.
+    private func exportHLSToMP4(hlsURL fallbackHLSURL: URL, videoId: String) async throws -> URL {
+        // Fresh iOS-client info keeps manifest + UA consistent and lets the
+        // API apply a stored PO token when one exists for this video.
+        let freshInfo = try? await api.fetchPlayerInfo(videoId: videoId)
+        let hlsURL = freshInfo?.hlsURL ?? fallbackHLSURL
+        let ua = InnerTubeClients.iOS.userAgent
+        let headers: [String: String] = [
+            "User-Agent": ua,
+            "Origin": "https://www.youtube.com",
+            "Referer": "https://www.youtube.com/",
+        ]
+        let assetOptions: [String: Any] = ["AVURLAssetHTTPHeaderFieldsKey": headers]
+
+        let asset: AVURLAsset
+        if let proxyURL = hlsURL.proxyURL {
+            let loader = YTHLSProxyLoader(
+                ua: ua, maximumVideoHeight: 1080, requiredVideoCodec: "avc1")
+            asset = AVURLAsset(url: proxyURL, options: assetOptions)
+            asset.resourceLoader.setDelegate(
+                loader, queue: DispatchQueue.global(qos: .userInitiated))
+            activeHLSLoader = loader
+        } else {
+            asset = AVURLAsset(url: hlsURL, options: assetOptions)
+        }
+        defer { activeHLSLoader = nil }
+
         // Force the manifest/tracks to load before creating the export
         // session so an unavailable HLS stream fails here with a real error.
         _ = try await asset.load(.tracks)
@@ -984,25 +1019,43 @@ public final class VideoDownloadService {
         else {
             throw URLError(.cannotDecodeContentData)
         }
+        nonisolated(unsafe) let exportSession = session
 
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(videoId)-hls.mp4")
         try? FileManager.default.removeItem(at: outputURL)
-        session.outputURL = outputURL
-        session.outputFileType = .mp4
-        session.shouldOptimizeForNetworkUse = true
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = .mp4
+        exportSession.shouldOptimizeForNetworkUse = true
+
+        let progressTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                guard let self, !Task.isCancelled else { return }
+                let progress = Double(exportSession.progress)
+                if progress < 1 {
+                    self.state = .downloading(progress: progress)
+                    #if os(iOS)
+                    if #available(iOS 16.1, *) {
+                        await self.updateLiveActivity(
+                            phase: .downloading, progress: Float(progress))
+                    }
+                    #endif
+                }
+            }
+        }
+        defer { progressTask.cancel() }
 
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            nonisolated(unsafe) let session = session
-            session.exportAsynchronously {
-                switch session.status {
+            exportSession.exportAsynchronously {
+                switch exportSession.status {
                 case .completed:
                     cont.resume()
                 case .cancelled:
                     cont.resume(throwing: CancellationError())
                 default:
                     cont.resume(
-                        throwing: session.error ?? URLError(.cannotDecodeContentData))
+                        throwing: exportSession.error ?? URLError(.cannotDecodeContentData))
                 }
             }
         }
