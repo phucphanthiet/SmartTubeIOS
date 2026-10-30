@@ -521,11 +521,17 @@ public final class VideoDownloadService {
         public let id: String
         public let title: String
         public let detail: String
-        /// Adaptive H.264 video + separate audio, merged locally. Nil for muxed.
+        /// Adaptive H.264 video + separate audio, merged locally. Nil otherwise.
         public let video: ResolvedFormat?
         public let audio: ResolvedFormat?
-        /// Pre-muxed MP4 (itag 18/22 style). Nil for adaptive options.
+        /// Pre-muxed MP4 (itag 18/22 style). Nil otherwise.
         public let muxed: ResolvedFormat?
+        /// The player's own HLS stream, exported to MP4 by AVFoundation.
+        /// Nil otherwise. This is the primary path since v5: direct adaptive
+        /// URLs are rejected by the CDN on device (the app has no on-device
+        /// n-parameter descrambler), while the HLS path is the exact stream
+        /// the player already plays successfully.
+        public let hlsURL: URL?
     }
 
     /// Audio output formats offered by the picker. MP3 is intentionally not
@@ -565,6 +571,12 @@ public final class VideoDownloadService {
         public let detail: String
         /// Best available audio stream, downloaded first, then converted.
         public let source: ResolvedFormat
+        /// True when `source` is a muxed video file whose audio track is
+        /// extracted locally (fallback when no direct audio stream works).
+        public let sourceIsMuxedVideo: Bool
+        /// Optional muxed-video source to try if the primary audio stream is
+        /// rejected or returns an empty response.
+        public let fallbackSource: ResolvedFormat?
     }
 
     private struct ClientSource {
@@ -598,20 +610,25 @@ public final class VideoDownloadService {
     /// Fetches player info from every client that answers and pairs each
     /// format with its client's UA. TV-authenticated (SABR) fetches are
     /// deliberately not used — their URLs are not directly downloadable.
-    private func resolveAllFormats(videoId: String) async -> [ResolvedFormat] {
+    /// Also captures the first HLS manifest URL any client offers.
+    private func resolveAllFormats(videoId: String) async -> (
+        formats: [ResolvedFormat], hlsURL: URL?
+    ) {
         var resolved: [ResolvedFormat] = []
+        var hlsURL: URL?
         for source in clientSources(videoId: videoId) {
             guard let info = try? await source.fetch() else {
                 downloadLog.notice("[download] resolve: \(source.label) client failed, skipping")
                 continue
             }
+            if hlsURL == nil { hlsURL = info.hlsURL }
             let withURL = info.formats.filter { $0.url != nil }
             downloadLog.notice(
                 "[download] resolve: \(source.label) formats=\(info.formats.count) withURL=\(withURL.count)"
             )
             resolved += withURL.map { ResolvedFormat(format: $0, userAgent: source.userAgent) }
         }
-        return resolved
+        return (resolved, hlsURL)
     }
 
     private static func formatSize(_ bytes: Double) -> String {
@@ -634,40 +651,32 @@ public final class VideoDownloadService {
         f.mimeType.hasPrefix("audio/mp4")
     }
 
-    /// Builds the quality list for the video download picker: every adaptive
-    /// H.264 MP4 height (merged with the best audio), plus the pre-muxed
-    /// option when one exists. VP9/WebM streams are excluded — AVFoundation
-    /// cannot merge them into an MP4 that Photos accepts.
+    /// Builds the download list for the video picker.
+    ///
+    /// The HLS option is intentionally first: it exports the same playback
+    /// stream AVPlayer is already able to play, instead of asking the CDN for
+    /// a raw adaptive file whose signed URL may be rejected. The pre-muxed
+    /// file is the proven fallback. Direct adaptive heights remain last and
+    /// are labelled experimental because YouTube may return an empty file.
     public func fetchVideoOptions(video: Video) async -> [VideoDownloadOption] {
-        let all = await resolveAllFormats(videoId: video.id)
+        let resolved = await resolveAllFormats(videoId: video.id)
+        let all = resolved.formats
         let duration = video.duration ?? 0
         let bestAudio = all.filter { Self.isAudioMP4($0.format) }
             .max { ($0.format.bitrate ?? 0) < ($1.format.bitrate ?? 0) }
 
         var options: [VideoDownloadOption] = []
-        var seenHeights = Set<Int>()
-        let avc = all.filter { Self.isAdaptiveAVC($0.format) }
-            .sorted { ($0.format.bitrate ?? 0) > ($1.format.bitrate ?? 0) }
-        for candidate in avc {
-            let h = candidate.format.height
-            guard h > 0, !seenHeights.contains(h) else { continue }
-            seenHeights.insert(h)
-            let vBitrate = Double(candidate.format.bitrate ?? 0)
-            let aBitrate = Double(bestAudio?.format.bitrate ?? 0)
-            let est = duration > 0 ? (vBitrate + aBitrate) * duration / 8 : 0
+
+        if let hlsURL = resolved.hlsURL {
             options.append(
                 VideoDownloadOption(
-                    id: "avc\(h)",
-                    title: "\(h)p",
-                    detail: est > 0
-                        ? "\(Self.formatSize(est)) • MP4 H.264 + AAC"
-                        : "MP4 H.264 + AAC",
-                    video: candidate,
-                    audio: bestAudio,
-                    muxed: nil))
-        }
-        options.sort { lhs, rhs in
-            (Int(lhs.id.dropFirst(3)) ?? 0) > (Int(rhs.id.dropFirst(3)) ?? 0)
+                    id: "hls",
+                    title: "Best quality • Player stream",
+                    detail: "Recommended • exports the HLS stream the player uses • MP4 up to 1080p",
+                    video: nil,
+                    audio: nil,
+                    muxed: nil,
+                    hlsURL: hlsURL))
         }
 
         if let muxed = all.filter({ Self.isMuxed($0.format) })
@@ -684,54 +693,119 @@ public final class VideoDownloadService {
                         : "Single file, fastest",
                     video: nil,
                     audio: nil,
-                    muxed: muxed))
+                    muxed: muxed,
+                    hlsURL: nil))
         }
+
+        // Keep direct adaptive choices available as a last resort, but do not
+        // let them displace the two reliable paths above.
+        var seenHeights = Set<Int>()
+        let avc = all.filter { Self.isAdaptiveAVC($0.format) }
+            .sorted { ($0.format.bitrate ?? 0) > ($1.format.bitrate ?? 0) }
+        var adaptiveOptions: [VideoDownloadOption] = []
+        for candidate in avc {
+            let h = candidate.format.height
+            guard h > 0, !seenHeights.contains(h) else { continue }
+            seenHeights.insert(h)
+            let vBitrate = Double(candidate.format.bitrate ?? 0)
+            let aBitrate = Double(bestAudio?.format.bitrate ?? 0)
+            let est = duration > 0 ? (vBitrate + aBitrate) * duration / 8 : 0
+            adaptiveOptions.append(
+                VideoDownloadOption(
+                    id: "avc\(h)",
+                    title: "\(h)p • Direct stream",
+                    detail: est > 0
+                        ? "\(Self.formatSize(est)) • experimental — YouTube may block direct downloads"
+                        : "Experimental — YouTube may block direct downloads",
+                    video: candidate,
+                    audio: bestAudio,
+                    muxed: nil,
+                    hlsURL: nil))
+        }
+        adaptiveOptions.sort { lhs, rhs in
+            (Int(lhs.id.dropFirst(3)) ?? 0) > (Int(rhs.id.dropFirst(3)) ?? 0)
+        }
+        options += adaptiveOptions
         return options
     }
 
     /// Builds the format list for the audio download picker, from the best
-    /// audio stream any client offers.
+    /// audio stream any client offers. When no separately downloadable audio
+    /// stream is available, it falls back to the audio track inside the
+    /// pre-muxed MP4 — the file path that already worked in v3.
     public func fetchAudioOptions(video: Video) async -> [AudioDownloadOption] {
-        let all = await resolveAllFormats(videoId: video.id)
-        guard
-            let source = all.filter({ Self.isAudioMP4($0.format) })
-                .max(by: { ($0.format.bitrate ?? 0) < ($1.format.bitrate ?? 0) })
-        else { return [] }
+        let resolved = await resolveAllFormats(videoId: video.id)
+        let all = resolved.formats
         let duration = video.duration ?? 0
-        let srcBitrate = Double(source.format.bitrate ?? 128_000)
+
+        let adaptiveSource = all.filter({ Self.isAudioMP4($0.format) })
+            .max(by: { ($0.format.bitrate ?? 0) < ($1.format.bitrate ?? 0) })
+        let muxedSource = all.filter({ Self.isMuxed($0.format) })
+            .max(by: { ($0.format.bitrate ?? 0) < ($1.format.bitrate ?? 0) })
+
+        let source: ResolvedFormat
+        let srcBitrate: Double
+        let sourceIsMuxedVideo: Bool
+        if let adaptiveSource {
+            source = adaptiveSource
+            srcBitrate = Double(adaptiveSource.format.bitrate ?? 128_000)
+            sourceIsMuxedVideo = false
+        } else if let muxedSource {
+            source = muxedSource
+            // itag 18's combined bitrate is mostly video; its AAC track is
+            // typically around 96 kbps. Use that conservative value for both
+            // estimates and the available conversion choices.
+            srcBitrate = 96_000
+            sourceIsMuxedVideo = true
+        } else {
+            return []
+        }
+
+        let fallbackSource = sourceIsMuxedVideo ? nil : muxedSource
+
         func est(_ bitrate: Double) -> String {
             duration > 0 ? Self.formatSize(bitrate * duration / 8) : ""
         }
         var options: [AudioDownloadOption] = [
             AudioDownloadOption(
                 kind: .original,
-                title: "Original (AAC, no conversion)",
-                detail: "\(est(srcBitrate)) • \(Int(srcBitrate / 1000)) kbps • .m4a",
-                source: source)
+                title: sourceIsMuxedVideo
+                    ? "Extract audio from video"
+                    : "Original (AAC, no conversion)",
+                detail: sourceIsMuxedVideo
+                    ? "\(est(srcBitrate)) • AAC ~96 kbps • extracted locally • .m4a"
+                    : "\(est(srcBitrate)) • \(Int(srcBitrate / 1000)) kbps • .m4a",
+                source: source,
+                sourceIsMuxedVideo: sourceIsMuxedVideo, fallbackSource: fallbackSource)
         ]
         if srcBitrate > 200_000 {
             options.append(
                 AudioDownloadOption(
                     kind: .aac256, title: "AAC 256 kbps",
-                    detail: "\(est(256_000)) • .m4a", source: source))
+                    detail: "\(est(256_000)) • .m4a", source: source,
+                    sourceIsMuxedVideo: sourceIsMuxedVideo, fallbackSource: fallbackSource))
         }
         options.append(
             AudioDownloadOption(
                 kind: .aac128, title: "AAC 128 kbps",
-                detail: "\(est(128_000)) • .m4a", source: source))
+                detail: "\(est(128_000)) • .m4a", source: source,
+                sourceIsMuxedVideo: sourceIsMuxedVideo, fallbackSource: fallbackSource))
         options.append(
             AudioDownloadOption(
                 kind: .aac64, title: "AAC 64 kbps (smallest)",
-                detail: "\(est(64_000)) • .m4a", source: source))
+                detail: "\(est(64_000)) • .m4a", source: source,
+                sourceIsMuxedVideo: sourceIsMuxedVideo, fallbackSource: fallbackSource))
         options.append(
             AudioDownloadOption(
                 kind: .m4r, title: "M4R ringtone (AAC 128 kbps)",
-                detail: "\(est(128_000)) • .m4r", source: source))
+                detail: "\(est(128_000)) • .m4r", source: source,
+                sourceIsMuxedVideo: sourceIsMuxedVideo, fallbackSource: fallbackSource))
         // WAV = 16-bit stereo PCM at 48 kHz ≈ 192 KB/s.
         options.append(
             AudioDownloadOption(
                 kind: .wav, title: "WAV (lossless, large)",
-                detail: "\(est(1_536_000)) • .wav", source: source))
+                detail: "\(est(1_536_000)) • .wav", source: source,
+                sourceIsMuxedVideo: sourceIsMuxedVideo, fallbackSource: fallbackSource))
         return options
     }
 
@@ -759,7 +833,9 @@ public final class VideoDownloadService {
             }
             state = .downloading(progress: 0)
             let finalURL: URL
-            if let muxed = option.muxed, let muxedURL = muxed.format.url {
+            if let hlsURL = option.hlsURL {
+                finalURL = try await exportHLSToMP4(hlsURL: hlsURL, videoId: video.id)
+            } else if let muxed = option.muxed, let muxedURL = muxed.format.url {
                 let tempURL = try await downloadToTempChecked(
                     url: muxedURL, videoId: video.id + "-dl", userAgent: muxed.userAgent)
                 state = .saving
@@ -815,27 +891,30 @@ public final class VideoDownloadService {
 
     private func performAudioDownload(video: Video, option: AudioDownloadOption) async {
         do {
-            guard let sourceURL = option.source.format.url else {
-                state = .failed("No downloadable audio stream found for this video")
-                return
-            }
             state = .downloading(progress: 0)
-            let tempURL = try await downloadToTempChecked(
-                url: sourceURL, videoId: video.id + "-aud", userAgent: option.source.userAgent)
-            defer { try? FileManager.default.removeItem(at: tempURL) }
-            state = .saving
             let ext = option.kind.fileExtension
             let destURL = DownloadStore.shared.destinationURL(
                 for: video.id + "__audio_" + option.kind.rawValue)
                 .deletingPathExtension().appendingPathExtension(ext)
             try? FileManager.default.createDirectory(
                 at: destURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? FileManager.default.removeItem(at: destURL)
-            if option.kind == .original {
-                try FileManager.default.copyItem(at: tempURL, to: destURL)
-            } else {
-                try await transcodeAudio(inputURL: tempURL, outputURL: destURL, kind: option.kind)
+
+            do {
+                try await writeAudioFile(
+                    video: video, option: option, source: option.source,
+                    sourceIsMuxedVideo: option.sourceIsMuxedVideo, destURL: destURL)
+            } catch {
+                guard let fallbackSource = option.fallbackSource else { throw error }
+                downloadLog.error(
+                    "[download-audio] primary stream failed (\(error.localizedDescription)); retrying from muxed video"
+                )
+                try? FileManager.default.removeItem(at: destURL)
+                state = .downloading(progress: 0)
+                try await writeAudioFile(
+                    video: video, option: option, source: fallbackSource,
+                    sourceIsMuxedVideo: true, destURL: destURL)
             }
+
             storeAudioInDownloadStore(video: video, audioFileURL: destURL, option: option)
             downloadLog.notice(
                 "[download-audio] ✅ saved \(video.id) kind=\(option.kind.rawValue) -> \(destURL.lastPathComponent)"
@@ -846,6 +925,29 @@ public final class VideoDownloadService {
         } catch {
             downloadLog.error("[download-audio] ❌ failed: \(error.localizedDescription)")
             state = .failed(error.localizedDescription)
+        }
+    }
+
+    /// Downloads one audio source and writes the requested output file.
+    /// A muxed MP4 source is decoded and only its audio track is written.
+    private func writeAudioFile(
+        video: Video, option: AudioDownloadOption, source: ResolvedFormat,
+        sourceIsMuxedVideo: Bool, destURL: URL
+    ) async throws {
+        guard let sourceURL = source.format.url else {
+            throw URLError(.badURL)
+        }
+        let tempURL = try await downloadToTempChecked(
+            url: sourceURL, videoId: video.id + "-aud", userAgent: source.userAgent)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        state = .saving
+        try? FileManager.default.removeItem(at: destURL)
+        if option.kind == .original && !sourceIsMuxedVideo {
+            try FileManager.default.copyItem(at: tempURL, to: destURL)
+        } else {
+            // For the muxed fallback this extracts only the audio track;
+            // the `.original` kind uses the writer's default AAC setting.
+            try await transcodeAudio(inputURL: tempURL, outputURL: destURL, kind: option.kind)
         }
     }
 
@@ -863,6 +965,54 @@ public final class VideoDownloadService {
                 fileURL: audioFileURL,
                 downloadedAt: Date()
             ))
+    }
+
+    /// Exports the player's HLS stream to a Photos-compatible MP4.
+    ///
+    /// This deliberately reuses the playback route rather than downloading a
+    /// raw googlevideo file. AVFoundation follows the signed HLS manifest and
+    /// its segment requests just as it does during playback, then the export
+    /// preset caps the result at 1920×1080 H.264/AAC for Photos.
+    private func exportHLSToMP4(hlsURL: URL, videoId: String) async throws -> URL {
+        let asset = AVURLAsset(url: hlsURL)
+        // Force the manifest/tracks to load before creating the export
+        // session so an unavailable HLS stream fails here with a real error.
+        _ = try await asset.load(.tracks)
+        guard
+            let session = AVAssetExportSession(
+                asset: asset, presetName: AVAssetExportPreset1920x1080)
+        else {
+            throw URLError(.cannotDecodeContentData)
+        }
+
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(videoId)-hls.mp4")
+        try? FileManager.default.removeItem(at: outputURL)
+        session.outputURL = outputURL
+        session.outputFileType = .mp4
+        session.shouldOptimizeForNetworkUse = true
+
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            nonisolated(unsafe) let session = session
+            session.exportAsynchronously {
+                switch session.status {
+                case .completed:
+                    cont.resume()
+                case .cancelled:
+                    cont.resume(throwing: CancellationError())
+                default:
+                    cont.resume(
+                        throwing: session.error ?? URLError(.cannotDecodeContentData))
+                }
+            }
+        }
+
+        let size =
+            (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? Int)
+            ?? 0
+        downloadLog.notice("[download] HLS export completed bytes=\(size)")
+        guard size > 0 else { throw URLError(.zeroByteResource) }
+        return outputURL
     }
 
     /// Downloads to a temp file, verifying the HTTP status is 200 — plain
