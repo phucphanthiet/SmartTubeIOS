@@ -137,7 +137,9 @@ public struct SettingsView: View {
                 }
             }
 
-            #if !os(iOS)
+            // Sideload fork: Default Quality is shown on iOS too — the iOS
+            // playback engine reads settings.preferredQuality (HLS max-height
+            // cap + track prefetch), upstream just never exposed the picker.
             Picker("Default Quality", selection: $store.settings.preferredQuality) {
                 ForEach(AppSettings.VideoQuality.allCases, id: \.self) { q in
                     Text(q.rawValue.capitalized).tag(q)
@@ -145,6 +147,7 @@ public struct SettingsView: View {
             }
             .accessibilityIdentifier("settings.preferredQualityPicker")
 
+            #if !os(iOS)
             Picker("Preferred Audio Language", selection: $store.settings.preferredAudioLanguage) {
                 Text("System Default").tag(nil as String?)
                 Divider()
@@ -232,10 +235,10 @@ public struct SettingsView: View {
             #else
             Toggle("Background Playback", isOn: $store.settings.backgroundPlaybackEnabled)
             #endif
-            #if !os(iOS)
+            // Sideload fork: shown on iOS too — PlaybackQualityManager reads
+            // settings.preferH264 when selecting formats on iOS as well.
             Toggle("Prefer H.264 Codec", isOn: $store.settings.preferH264)
                 .accessibilityIdentifier("settings.preferH264Toggle")
-            #endif
         }
     }
 

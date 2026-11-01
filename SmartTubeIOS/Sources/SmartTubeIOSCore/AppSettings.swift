@@ -254,7 +254,7 @@ public struct AppSettings: Codable {
     // MARK: Defaults
 
     public init() {
-        preferredQuality = .auto
+        preferredQuality = .q1080
         playbackSpeed = 1.0
         autoplayEnabled = true
         subtitlesLanguage = nil
@@ -310,7 +310,7 @@ public struct AppSettings: Codable {
         deArrowEnabled = false
         poTokenServiceURL = nil
         audioOnlyMode = false
-        preferH264 = false
+        preferH264 = true
         iCloudSyncEnabled = false
         #if os(macOS)
         useTOSPlayerOnMac = true
