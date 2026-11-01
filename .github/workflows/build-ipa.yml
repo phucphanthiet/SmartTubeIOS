@@ -34,7 +34,7 @@ jobs:
           <plist version="1.0">
           <dict>
             <key>API_KEY</key>
-            <string>AIzaSyDummyKeyForLocalSideloadBuild00</string>
+            <string>AIzaSyDummyKeyForSideloadBuild000000000</string>
             <key>GCM_SENDER_ID</key>
             <string>123456789000</string>
             <key>PLIST_VERSION</key>
@@ -56,7 +56,7 @@ jobs:
             <key>IS_SIGNIN_ENABLED</key>
             <true/>
             <key>GOOGLE_APP_ID</key>
-            <string>1:123456789000:ios:0123456789abcdef01234567</string>
+            <string>1:123456789000:ios:0123456789abcdef0123456789abcdef01234567</string>
             <key>DATABASE_URL</key>
             <string>https://smarttube-sideload-dummy.firebaseio.com</string>
           </dict>

@@ -5,4 +5,4 @@
 // Project-level only: SwiftPM dependency targets (Firebase, …) do not
 // inherit this, unlike a command-line SWIFT_ACTIVE_COMPILATION_CONDITIONS
 // override, which broke Firebase's GoogleUtilities module resolution.
-SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) ENABLE_DOWNLOADS
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) ENABLE_DOWNLOADS SIDELOAD_BUILD

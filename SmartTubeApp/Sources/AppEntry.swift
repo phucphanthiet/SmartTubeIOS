@@ -60,10 +60,22 @@ struct AppEntry: App {
         // methods know to skip Crashlytics.crashlytics() instead of hitting the fatal
         // "default app not configured" error.
         let settingsStore = SettingsStore()
+        #if SIDELOAD_BUILD
+        // Sideload builds ship a dummy GoogleService-Info.plist (no real
+        // Firebase project). Never configure Firebase at all: on a fresh
+        // standalone install (SideStore) FIRInstallations validates the
+        // fake API key during configure() and throws, aborting the process
+        // before the first frame (crash log 2026-11-01). Inside
+        // LiveContainer this stayed hidden because saved settings already
+        // had analytics disabled, so configure() was never reached.
+        // Skipping Firebase also removes its startup work entirely.
+        CrashlyticsLogger.isEnabled = false
+        #else
         CrashlyticsLogger.isEnabled = !settingsStore.settings.disableAnalytics
         if CrashlyticsLogger.isEnabled {
             FirebaseApp.configure()
         }
+        #endif
         let poTokenProvider: (any PoTokenProvider)? = {
             if let url = settingsStore.settings.poTokenServiceURL {
                 return ServerPoTokenProvider(serviceURL: url)
